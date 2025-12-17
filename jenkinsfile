@@ -1,108 +1,314 @@
 pipeline {
-    agent any
+    agent {
+        kubernetes {
+            yaml """
+apiVersion: v1
+kind: Pod
+spec:
+  serviceAccountName: jenkins
+  containers:
+  - name: jnlp
+    image: jenkins/inbound-agent:latest
+    tty: true
+    volumeMounts:
+    - name: workspace-volume
+      mountPath: /home/jenkins/agent
+  - name: docker
+    image: docker:24-dind
+    securityContext:
+      privileged: true
+    command:
+    - dockerd-entrypoint.sh
+    env:
+    - name: DOCKER_TLS_CERTDIR
+      value: ""
+    tty: true
+    volumeMounts:
+    - name: docker-run
+      mountPath: /var/run
+    - name: docker-storage
+      mountPath: /var/lib/docker
+    - name: workspace-volume
+      mountPath: /home/jenkins/agent
+  volumes:
+  - name: workspace-volume
+    emptyDir: {}
+  - name: docker-storage
+    emptyDir: {}
+  - name: docker-run
+    emptyDir: {}
+"""
+        }
+    }
+    
     tools {
         jdk 'jdk17'
         nodejs 'node23'
     }
+    
     environment {
-        SCANNER_HOME=tool 'sonar-scanner'
+        SCANNER_HOME = tool 'sonar-scanner'
+        DOCKER_IMAGE_NAME = 'zomato'
+        DOCKER_IMAGE_TAG = 'latest'
     }
+    
+    // Git webhook trigger configuration
+    triggers {
+        pollSCM('H/1 * * * *')  // Backup polling every 5 minutes
+        githubPush()             // Trigger on GitHub webhook
+    }
+    
     stages {
-        stage ("clean workspace") {
+        stage('Clean Workspace') {
             steps {
                 cleanWs()
             }
         }
-        stage ("Git Checkout") {
+        
+        stage('Git Checkout') {
             steps {
-                git 'https://github.com/KastroVKiran/Zomato-Project-Kastro.git'
+                deleteDir()
+                git branch: 'master', 
+                    credentialsId: 'github-token', 
+                    url: 'https://github.com/kapilbtech/devops-project-zmt.git'
             }
         }
-        stage("Sonarqube Analysis"){
-            steps{
+        
+        stage('Verify Workspace') {
+            steps {
+                container('docker') {
+                    sh '''
+                        echo "Current Directory:"
+                        pwd
+                        echo "Files in Directory:"
+                        ls -la
+                    '''
+                }
+            }
+        }
+        
+        stage('SonarQube Analysis') {
+            steps {
                 withSonarQubeEnv('sonar-server') {
-                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=zomato \
-                    -Dsonar.projectKey=zomato '''
+                    sh '''
+                        $SCANNER_HOME/bin/sonar-scanner \
+                        -Dsonar.projectName=zomato \
+                        -Dsonar.projectKey=zomato
+                    '''
                 }
             }
         }
-        stage("Code Quality Gate"){
-           steps {
-                script {
-                    waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-token' 
-                }
-            } 
-        }
-        stage("Install NPM Dependencies") {
-            steps {
-                sh "npm install"
-            }
-        }
-        stage('OWASP FS SCAN') {
-            steps {
-                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit -n', odcInstallation: 'DP-Check'
-                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
-    }
-}
-        stage ("Trivy File Scan") {
-            steps {
-                sh "trivy fs . > trivy.txt"
-            }
-        }
-        stage ("Build Docker Image") {
-            steps {
-                sh "docker build -t zomato ."
-            }
-        }
-        stage ("Tag & Push to DockerHub") {
+        
+        stage('Quality Gate') {
             steps {
                 script {
-                    withDockerRegistry(credentialsId: 'docker') {
-                        sh "docker tag zomato kastrov/zomato:latest "
-                        sh "docker push kastrov/zomato:latest "
+                    timeout(time: 10, unit: 'MINUTES') {
+                        waitForQualityGate abortPipeline: false, credentialsId: 'sonar-token'
                     }
                 }
             }
         }
-        stage('Docker Scout Image') {
+        
+        stage('Install NPM Dependencies') {
             steps {
-                script{
-                   withDockerRegistry(credentialsId: 'docker', toolName: 'docker'){
-                       sh 'docker-scout quickview kastrov/zomato:latest'
-                       sh 'docker-scout cves kastrov/zomato:latest'
-                       sh 'docker-scout recommendations kastrov/zomato:latest'
-                   }
+                sh 'npm install'
+            }
+        }
+        
+        stage('OWASP Dependency Check') {
+            steps {
+                script {
+                    def dcHome = tool name: 'DP-Check'
+                    sh 'mkdir -p dependency-check-report'
+                    withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_API_KEY')]) {
+                        sh """
+                            ${dcHome}/bin/dependency-check.sh \
+                            --scan . \
+                            --format HTML \
+                            --format XML \
+                            --out dependency-check-report \
+                            --prettyPrint \
+                            --disableYarnAudit \
+                            --nvdApiKey \${NVD_API_KEY}
+                        """
+                    }
+                }
+                dependencyCheckPublisher pattern: 'dependency-check-report/dependency-check-report.xml'
+            }
+        }
+        
+        stage('Trivy File Scan') {
+            steps {
+                withEnv(["TRIVY_SERVER_URL=http://10.206.223.48:32384"]) {
+                    sh """
+                        trivy client \$TRIVY_SERVER_URL fs . > trivy.txt || true
+                    """
                 }
             }
         }
-        stage ("Deploy to Container") {
+        
+        stage('Wait for Docker') {
             steps {
-                sh 'docker run -d --name zomato -p 3000:3000 kastrov/zomato:latest'
+                container('docker') {
+                    sh '''
+                        echo "Waiting for Docker socket..."
+                        until [ -S /var/run/docker.sock ]; do 
+                            sleep 2
+                        done
+                        docker info
+                    '''
+                }
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                container('docker') {
+                    sh """
+                        docker build -t ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG} .
+                    """
+                }
+            }
+        }
+        
+        stage('Trivy Image Scan') {
+            steps {
+                container('docker') {
+                    withEnv(["TRIVY_SERVER_URL=http://10.206.223.48:32384"]) {
+                        sh """
+                            trivy client \$TRIVY_SERVER_URL image ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG} > trivy-image.txt || true
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Push Docker Image') {
+            steps {
+                container('docker') {
+                    withCredentials([usernamePassword(
+                        credentialsId: 'dockerhub-creds',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
+                    )]) {
+                        sh """
+                            echo \$DOCKER_PASS | docker login -u \$DOCKER_USER --password-stdin
+                            docker tag ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG} \$DOCKER_USER/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}
+                            docker push \$DOCKER_USER/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy to Kubernetes') {
+            steps {
+                script {
+                    withKubeConfig(credentialsId: 'k8s-config') {
+                        sh '''
+                            echo "Current Directory: $(pwd)"
+                            kubectl apply -f k8s/zomato-deployment.yaml
+                            kubectl rollout status deployment/zomato --timeout=5m
+                        '''
+                    }
+                }
             }
         }
     }
+    
     post {
-    always {
-        emailext attachLog: true,
-            subject: "'${currentBuild.result}'",
-            body: """
-                <html>
-                <body>
-                    <div style="background-color: #FFA07A; padding: 10px; margin-bottom: 10px;">
-                        <p style="color: white; font-weight: bold;">Project: ${env.JOB_NAME}</p>
-                    </div>
-                    <div style="background-color: #90EE90; padding: 10px; margin-bottom: 10px;">
-                        <p style="color: white; font-weight: bold;">Build Number: ${env.BUILD_NUMBER}</p>
-                    </div>
-                    <div style="background-color: #87CEEB; padding: 10px; margin-bottom: 10px;">
-                        <p style="color: white; font-weight: bold;">URL: ${env.BUILD_URL}</p>
-                    </div>
-                </body>
-                </html>
-            """,
-            to: 'kastrokiran@gmail.com',
-            mimeType: 'text/html',
-            attachmentsPattern: 'trivy.txt'
+        success {
+            emailext(
+                to: 'kapilbtech86@gmail.com',
+                subject: "✅ SUCCESS: ${env.JOB_NAME} - Build #${env.BUILD_NUMBER}",
+                body: """
+                    <html>
+                    <body>
+                        <h2 style="color: green;">Build Successful!</h2>
+                        <table border="1" cellpadding="5">
+                            <tr><td><b>Project:</b></td><td>${env.JOB_NAME}</td></tr>
+                            <tr><td><b>Build Number:</b></td><td>${env.BUILD_NUMBER}</td></tr>
+                            <tr><td><b>Build Status:</b></td><td style="color: green;">SUCCESS</td></tr>
+                            <tr><td><b>Build URL:</b></td><td><a href="${env.BUILD_URL}">${env.BUILD_URL}</a></td></tr>
+                            <tr><td><b>Git Commit:</b></td><td>${env.GIT_COMMIT}</td></tr>
+                            <tr><td><b>Duration:</b></td><td>${currentBuild.durationString}</td></tr>
+                        </table>
+                        <h3>Deployment Details:</h3>
+                        <p>The application has been successfully deployed to Kubernetes cluster.</p>
+                    </body>
+                    </html>
+                """,
+                mimeType: 'text/html',
+                attachLog: true,
+                attachmentsPattern: 'trivy.txt,trivy-image.txt'
+            )
+        }
+        
+        failure {
+            emailext(
+                to: 'kapilbtech86@gmail.com',
+                subject: "❌ FAILURE: ${env.JOB_NAME} - Build #${env.BUILD_NUMBER}",
+                body: """
+                    <html>
+                    <body>
+                        <h2 style="color: red;">Build Failed!</h2>
+                        <table border="1" cellpadding="5">
+                            <tr><td><b>Project:</b></td><td>${env.JOB_NAME}</td></tr>
+                            <tr><td><b>Build Number:</b></td><td>${env.BUILD_NUMBER}</td></tr>
+                            <tr><td><b>Build Status:</b></td><td style="color: red;">FAILURE</td></tr>
+                            <tr><td><b>Build URL:</b></td><td><a href="${env.BUILD_URL}">${env.BUILD_URL}</a></td></tr>
+                            <tr><td><b>Git Commit:</b></td><td>${env.GIT_COMMIT}</td></tr>
+                            <tr><td><b>Duration:</b></td><td>${currentBuild.durationString}</td></tr>
+                            <tr><td><b>Failed Stage:</b></td><td>${env.STAGE_NAME}</td></tr>
+                        </table>
+                        <h3>Error Details:</h3>
+                        <p>Please check the attached build log for more details.</p>
+                        <p><a href="${env.BUILD_URL}console">View Console Output</a></p>
+                    </body>
+                    </html>
+                """,
+                mimeType: 'text/html',
+                attachLog: true,
+                attachmentsPattern: 'trivy.txt,trivy-image.txt'
+            )
+        }
+        
+        unstable {
+            emailext(
+                to: 'kapilbtech51@gmail.com',
+                subject: "⚠️ UNSTABLE: ${env.JOB_NAME} - Build #${env.BUILD_NUMBER}",
+                body: """
+                    <html>
+                    <body>
+                        <h2 style="color: orange;">Build Unstable!</h2>
+                        <table border="1" cellpadding="5">
+                            <tr><td><b>Project:</b></td><td>${env.JOB_NAME}</td></tr>
+                            <tr><td><b>Build Number:</b></td><td>${env.BUILD_NUMBER}</td></tr>
+                            <tr><td><b>Build Status:</b></td><td style="color: orange;">UNSTABLE</td></tr>
+                            <tr><td><b>Build URL:</b></td><td><a href="${env.BUILD_URL}">${env.BUILD_URL}</a></td></tr>
+                            <tr><td><b>Git Commit:</b></td><td>${env.GIT_COMMIT}</td></tr>
+                            <tr><td><b>Duration:</b></td><td>${currentBuild.durationString}</td></tr>
+                        </table>
+                        <h3>Warning:</h3>
+                        <p>The build completed but with warnings. Please review the attached reports.</p>
+                    </body>
+                    </html>
+                """,
+                mimeType: 'text/html',
+                attachLog: true,
+                attachmentsPattern: 'trivy.txt,trivy-image.txt'
+            )
+        }
+        
+        always {
+            cleanWs(
+                cleanWhenNotBuilt: false,
+                deleteDirs: true,
+                disableDeferredWipeout: true,
+                patterns: [
+                    [pattern: 'node_modules', type: 'EXCLUDE']
+                ]
+            )
         }
     }
 }
