@@ -138,29 +138,6 @@ spec:
             }
         }
         
-        stage('OWASP Dependency Check') {
-            steps {
-                container('jnlp') {
-                    script {
-                        def dcHome = tool name: 'DP-Check'
-                        sh 'mkdir -p dependency-check-report'
-                        withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_API_KEY')]) {
-                            sh """
-                                ${dcHome}/bin/dependency-check.sh \
-                                --scan . \
-                                --format HTML \
-                                --format XML \
-                                --out dependency-check-report \
-                                --prettyPrint \
-                                --disableYarnAudit \
-                                --nvdApiKey \${NVD_API_KEY}
-                            """
-                        }
-                    }
-                    dependencyCheckPublisher pattern: 'dependency-check-report/dependency-check-report.xml'
-                }
-            }
-        }
         
         stage('Trivy File Scan') {
             steps {
@@ -242,7 +219,7 @@ spec:
             steps {
                 container('jnlp') {
                     script {
-                        withKubeConfig(credentialsId: 'k8s-config') {
+                        withKubeConfig(credentialsId: 'k8-token') {
                             sh '''
                                 echo "Current Directory: $(pwd)"
                                 echo "Applying Kubernetes deployment..."
