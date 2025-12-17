@@ -13,6 +13,16 @@ spec:
     volumeMounts:
     - name: workspace-volume
       mountPath: /home/jenkins/agent
+  - name: node
+    image: node:23-alpine
+    command:
+    - cat
+    tty: true
+    volumeMounts:
+    - name: workspace-volume
+      mountPath: /home/jenkins/agent
+    - name: npm-cache
+      mountPath: /root/.npm
   - name: docker
     image: docker:24-dind
     securityContext:
@@ -37,13 +47,14 @@ spec:
     emptyDir: {}
   - name: docker-run
     emptyDir: {}
+  - name: npm-cache
+    emptyDir: {}
 """
         }
     }
     
     tools {
         jdk 'jdk17'
-        nodejs 'node23'
     }
     
     environment {
@@ -54,7 +65,7 @@ spec:
     
     // Git webhook trigger configuration
     triggers {
-        pollSCM('H/1 * * * *')  // Backup polling every 5 minutes
+        pollSCM('H/1 * * * *')  // Backup polling every 1 minutes
         githubPush()             // Trigger on GitHub webhook
     }
     
@@ -76,12 +87,15 @@ spec:
         
         stage('Verify Workspace') {
             steps {
-                container('docker') {
+                container('node') {
                     sh '''
                         echo "Current Directory:"
                         pwd
                         echo "Files in Directory:"
                         ls -la
+                        echo "Node Version:"
+                        node --version
+                        npm --version
                     '''
                 }
             }
@@ -89,21 +103,25 @@ spec:
         
         stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv('sonar-scanner') {
-                    sh '''
-                        $SCANNER_HOME/bin/sonar-scanner \
-                        -Dsonar.projectName=zomato \
-                        -Dsonar.projectKey=zomato
-                    '''
+                container('jnlp') {
+                    withSonarQubeEnv('sonar-server') {
+                        sh '''
+                            $SCANNER_HOME/bin/sonar-scanner \
+                            -Dsonar.projectName=zomato \
+                            -Dsonar.projectKey=zomato
+                        '''
+                    }
                 }
             }
         }
         
         stage('Quality Gate') {
             steps {
-                script {
-                    timeout(time: 10, unit: 'MINUTES') {
-                        waitForQualityGate abortPipeline: false, credentialsId: 'sonar-token'
+                container('jnlp') {
+                    script {
+                        timeout(time: 10, unit: 'MINUTES') {
+                            waitForQualityGate abortPipeline: false, credentialsId: 'sonar-token'
+                        }
                     }
                 }
             }
@@ -111,38 +129,47 @@ spec:
         
         stage('Install NPM Dependencies') {
             steps {
-                sh 'npm install'
+                container('node') {
+                    sh '''
+                        echo "Installing NPM dependencies..."
+                        npm install --verbose
+                    '''
+                }
             }
         }
         
         stage('OWASP Dependency Check') {
             steps {
-                script {
-                    def dcHome = tool name: 'DP-Check'
-                    sh 'mkdir -p dependency-check-report'
-                    withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_API_KEY')]) {
-                        sh """
-                            ${dcHome}/bin/dependency-check.sh \
-                            --scan . \
-                            --format HTML \
-                            --format XML \
-                            --out dependency-check-report \
-                            --prettyPrint \
-                            --disableYarnAudit \
-                            --nvdApiKey \${NVD_API_KEY}
-                        """
+                container('jnlp') {
+                    script {
+                        def dcHome = tool name: 'DP-Check'
+                        sh 'mkdir -p dependency-check-report'
+                        withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_API_KEY')]) {
+                            sh """
+                                ${dcHome}/bin/dependency-check.sh \
+                                --scan . \
+                                --format HTML \
+                                --format XML \
+                                --out dependency-check-report \
+                                --prettyPrint \
+                                --disableYarnAudit \
+                                --nvdApiKey \${NVD_API_KEY}
+                            """
+                        }
                     }
+                    dependencyCheckPublisher pattern: 'dependency-check-report/dependency-check-report.xml'
                 }
-                dependencyCheckPublisher pattern: 'dependency-check-report/dependency-check-report.xml'
             }
         }
         
         stage('Trivy File Scan') {
             steps {
-                withEnv(["TRIVY_SERVER_URL=http://10.206.223.48:32384"]) {
-                    sh """
-                        trivy client \$TRIVY_SERVER_URL fs . > trivy.txt || true
-                    """
+                container('jnlp') {
+                    withEnv(["TRIVY_SERVER_URL=http://10.206.223.48:32384"]) {
+                        sh """
+                            trivy client \$TRIVY_SERVER_URL fs . > trivy.txt || true
+                        """
+                    }
                 }
             }
         }
@@ -155,6 +182,7 @@ spec:
                         until [ -S /var/run/docker.sock ]; do 
                             sleep 2
                         done
+                        echo "Docker is ready!"
                         docker info
                     '''
                 }
@@ -165,7 +193,9 @@ spec:
             steps {
                 container('docker') {
                     sh """
+                        echo "Building Docker image..."
                         docker build -t ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG} .
+                        echo "Docker image built successfully!"
                     """
                 }
             }
@@ -173,7 +203,7 @@ spec:
         
         stage('Trivy Image Scan') {
             steps {
-                container('docker') {
+                container('jnlp') {
                     withEnv(["TRIVY_SERVER_URL=http://10.206.223.48:32384"]) {
                         sh """
                             trivy client \$TRIVY_SERVER_URL image ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG} > trivy-image.txt || true
@@ -192,9 +222,16 @@ spec:
                         passwordVariable: 'DOCKER_PASS'
                     )]) {
                         sh """
+                            echo "Logging into Docker Hub..."
                             echo \$DOCKER_PASS | docker login -u \$DOCKER_USER --password-stdin
+                            
+                            echo "Tagging image..."
                             docker tag ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG} \$DOCKER_USER/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}
+                            
+                            echo "Pushing image to Docker Hub..."
                             docker push \$DOCKER_USER/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}
+                            
+                            echo "Image pushed successfully!"
                         """
                     }
                 }
@@ -203,20 +240,27 @@ spec:
         
         stage('Deploy to Kubernetes') {
             steps {
-                script {
-                    withKubeConfig(credentialsId: 'k8s-config') {
-                        sh '''
-                            echo "Current Directory: $(pwd)"
-                            kubectl apply -f k8s/zomato-deployment.yaml
-                            kubectl rollout status deployment/zomato --timeout=5m
-                        '''
+                container('jnlp') {
+                    script {
+                        withKubeConfig(credentialsId: 'k8s-config') {
+                            sh '''
+                                echo "Current Directory: $(pwd)"
+                                echo "Applying Kubernetes deployment..."
+                                kubectl apply -f k8s/zomato-deployment.yaml
+                                
+                                echo "Waiting for rollout to complete..."
+                                kubectl rollout status deployment/zomato --timeout=5m
+                                
+                                echo "Deployment successful!"
+                            '''
+                        }
                     }
                 }
             }
         }
     }
     
-        post {
+    post {
         success {
             script {
                 // Using email credentials from Jenkins
@@ -340,6 +384,10 @@ spec:
         }
         
         always {
+            // Archive important artifacts before cleanup
+            script {
+                archiveArtifacts artifacts: 'trivy*.txt,dependency-check-report/**', allowEmptyArchive: true
+            }
             cleanWs(
                 cleanWhenNotBuilt: false,
                 deleteDirs: true,
