@@ -236,41 +236,47 @@ spec:
             }
         }
     }
+
     post {
-       always {
-    	 script {
+    always {
+        script {
             withCredentials([usernamePassword(
-               credentialsId: 'email-creds',
-               usernameVariable: 'EMAIL_USER',
-               passwordVariable: 'EMAIL_PASS'
-         )]) {
+                credentialsId: 'email-creds',
+                usernameVariable: 'EMAIL_USER',
+                passwordVariable: 'EMAIL_PASS'
+            )]) {
 
-        def statusColor = currentBuild.currentResult == 'SUCCESS' ? 'green' :
-                          currentBuild.currentResult == 'FAILURE' ? 'red' : 'orange'
+                def statusColor = currentBuild.currentResult == 'SUCCESS' ? 'green' :
+                                  currentBuild.currentResult == 'FAILURE' ? 'red' : 'orange'
 
-        emailext(
-          to: 'kapilbtech86@gmail.com',
-          from: EMAIL_USER,
-          subject: "${currentBuild.currentResult}: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-          mimeType: 'text/html',
-          attachLog: false,   // IMPORTANT
-          attachmentsPattern: '',  // IMPORTANT
-          body: """
-          <html>
-            <body>
-              <h2 style="color:${statusColor};">Build ${currentBuild.currentResult}</h2>
-              <table border="1" cellpadding="5">
-                <tr><td>Job</td><td>${env.JOB_NAME}</td></tr>
-                <tr><td>Build</td><td>${env.BUILD_NUMBER}</td></tr>
-                <tr><td>Status</td><td>${currentBuild.currentResult}</td></tr>
-                <tr><td>URL</td><td><a href="${env.BUILD_URL}">${env.BUILD_URL}</a></td></tr>
-              </table>
-            </body>
-          </html>
-          """
-         )
-      }
+                emailext(
+                    to: 'kapilbtech51@gmail.com',
+                    from: EMAIL_USER,
+                    subject: "${currentBuild.currentResult}: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                    mimeType: 'text/html',
+                    attachLog: false,
+                    attachmentsPattern: '',
+                    body: """
+                    <html>
+                      <body>
+                        <h2 style="color:${statusColor};">
+                          Build ${currentBuild.currentResult}
+                        </h2>
+                        <table border="1" cellpadding="5">
+                          <tr><td>Job</td><td>${env.JOB_NAME}</td></tr>
+                          <tr><td>Build</td><td>${env.BUILD_NUMBER}</td></tr>
+                          <tr><td>Status</td><td>${currentBuild.currentResult}</td></tr>
+                          <tr><td>URL</td>
+                              <td><a href="${env.BUILD_URL}">${env.BUILD_URL}</a></td>
+                          </tr>
+                        </table>
+                      </body>
+                    </html>
+                    """
+                )
+            }
+        }
     }
-  }
 }
+
 
