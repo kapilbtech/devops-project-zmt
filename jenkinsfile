@@ -241,8 +241,7 @@ spec:
                     }
                 }
             }
-        }
-    }
+    
 
     post {
     always {
