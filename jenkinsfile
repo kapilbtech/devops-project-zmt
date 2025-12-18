@@ -19,6 +19,9 @@ spec:
     command:
     - cat
     tty: true
+    volumeMounts:
+    - name: workspace-volume
+      mountPath: /home/jenkins/agent
    
   - name: node
     image: node:23-alpine
@@ -241,8 +244,7 @@ spec:
                     }
                 }
             }
-        }
-    }
+	}
 
     post {
     always {
