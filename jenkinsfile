@@ -223,7 +223,7 @@ spec:
                             sh '''
                                 echo "Current Directory: $(pwd)"
                                 echo "Applying Kubernetes deployment..."
-                                kubectl apply -f k8s/zomato-deployment.yaml
+                                kubectl apply -f zomato-deployment.yaml
                                 
                                 echo "Waiting for rollout to complete..."
                                 kubectl rollout status deployment/zomato --timeout=5m
