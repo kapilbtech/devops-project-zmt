@@ -2,291 +2,288 @@ pipeline {
     agent {
         kubernetes {
             yaml """
-apiVersion: v1
-kind: Pod
-spec:
-  serviceAccountName: jenkins
-  containers:
-  - name: jnlp
-    image: jenkins/inbound-agent:latest
-    tty: true
-    volumeMounts:
-    - name: workspace-volume
-      mountPath: /home/jenkins/agent
-
-  - name: kubectl
-    image: bitnami/kubectl:latest
-    command:
-    - cat
-    tty: true
-    volumeMounts:
-    - name: workspace-volume
-      mountPath: /home/jenkins/agent
-   
-  - name: node
-    image: node:23-alpine
-    command:
-    - cat
-    tty: true
-    volumeMounts:
-    - name: workspace-volume
-      mountPath: /home/jenkins/agent
-    - name: npm-cache
-      mountPath: /root/.npm
-  - name: docker
-    image: docker:24-dind
-    securityContext:
-      privileged: true
-    command:
-    - dockerd-entrypoint.sh
-    env:
-    - name: DOCKER_TLS_CERTDIR
-      value: ""
-    tty: true
-    volumeMounts:
+            apiVersion: v1
+            kind: Pod
+            spec:
+            serviceAccountName: jenkins
+            containers:
+            - name: jnlp
+            image: jenkins/inbound-agent:latest
+            tty: true
+            volumeMounts:
+            - name: workspace-volume
+            mountPath: /home/jenkins/agent
+            
+            - name: kubectl
+            image: bitnami/kubectl:latest
+            command:
+            - cat
+            tty: true
+            volumeMounts:
+            - name: workspace-volume
+            mountPath: /home/jenkins/agent
+            
+            - name: node
+            image: node:23-alpine
+            command:
+            - cat
+            tty: true
+            volumeMounts:
+            - name: workspace-volume
+            mountPath: /home/jenkins/agent
+            - name: npm-cache
+            mountPath: /root/.npm
+            - name: docker
+            image: docker:24-dind
+            securityContext:
+            privileged: true
+            command:
+            - dockerd-entrypoint.sh
+            env:
+            - name: DOCKER_TLS_CERTDIR
+            value: ""
+            tty: true
+            volumeMounts:
+            - name: docker-run
+            mountPath: /var/run
+            - name: docker-storage
+            mountPath: /var/lib/docker
+            - name: workspace-volume
+            mountPath: /home/jenkins/agent
+            volumes:
+            - name: workspace-volume
+        emptyDir: {}
+        - name: docker-storage
+    emptyDir: {}
     - name: docker-run
-      mountPath: /var/run
-    - name: docker-storage
-      mountPath: /var/lib/docker
-    - name: workspace-volume
-      mountPath: /home/jenkins/agent
-  volumes:
-  - name: workspace-volume
-    emptyDir: {}
-  - name: docker-storage
-    emptyDir: {}
-  - name: docker-run
-    emptyDir: {}
-  - name: npm-cache
-    emptyDir: {}
+emptyDir: {}
+- name: npm-cache
+emptyDir: {}
 """
+}
+}
+
+tools {
+    jdk 'jdk17'
+}
+
+environment {
+    SCANNER_HOME = tool 'sonar-scanner'
+    DOCKER_IMAGE_NAME = 'zomato'
+    DOCKER_IMAGE_TAG = 'latest'
+}
+
+// Git webhook trigger configuration
+triggers {
+    pollSCM('H/1 * * * *') // Backup polling every 1 minutes
+    githubPush() // Trigger on GitHub webhook
+}
+
+stages {
+    stage('Clean Workspace') {
+        steps {
+            cleanWs()
         }
     }
     
-    tools {
-        jdk 'jdk17'
+    stage('Git Checkout') {
+        steps {
+            deleteDir()
+            git branch: 'master',
+            credentialsId: 'github-token',
+            url: 'https://github.com/kapilbtech/devops-project-zmt.git'
+        }
     }
     
-    environment {
-        SCANNER_HOME = tool 'sonar-scanner'
-        DOCKER_IMAGE_NAME = 'zomato'
-        DOCKER_IMAGE_TAG = 'latest'
-    }
-    
-    // Git webhook trigger configuration
-    triggers {
-        pollSCM('H/1 * * * *')  // Backup polling every 1 minutes
-        githubPush()             // Trigger on GitHub webhook
-    }
-    
-    stages {
-        stage('Clean Workspace') {
-            steps {
-                cleanWs()
+    stage('Verify Workspace') {
+        steps {
+            container('node') {
+                sh '''
+                echo "Current Directory:"
+                pwd
+                echo "Files in Directory:"
+                ls -la
+                echo "Node Version:"
+                node --version
+                npm --version
+                '''
             }
         }
-        
-        stage('Git Checkout') {
-            steps {
-                deleteDir()
-                git branch: 'master', 
-                    credentialsId: 'github-token', 
-                    url: 'https://github.com/kapilbtech/devops-project-zmt.git'
-            }
-        }
-        
-        stage('Verify Workspace') {
-            steps {
-                container('node') {
+    }
+    
+    stage('SonarQube Analysis') {
+        steps {
+            container('jnlp') {
+                withSonarQubeEnv('sonar-scanner') {
                     sh '''
-                        echo "Current Directory:"
-                        pwd
-                        echo "Files in Directory:"
-                        ls -la
-                        echo "Node Version:"
-                        node --version
-                        npm --version
+                    $SCANNER_HOME/bin/sonar-scanner \
+                    -Dsonar.projectName=zomato \
+                    -Dsonar.projectKey=zomato
                     '''
                 }
             }
         }
-        
-        stage('SonarQube Analysis') {
-            steps {
-                container('jnlp') {
-                    withSonarQubeEnv('sonar-scanner') {
-                        sh '''
-                            $SCANNER_HOME/bin/sonar-scanner \
-                            -Dsonar.projectName=zomato \
-                            -Dsonar.projectKey=zomato
-                        '''
+    }
+    
+    stage('Quality Gate') {
+        steps {
+            container('jnlp') {
+                script {
+                    timeout(time: 10, unit: 'MINUTES') {
+                        waitForQualityGate abortPipeline: false, credentialsId: 'sonar-token'
                     }
                 }
             }
         }
-        
-        stage('Quality Gate') {
-            steps {
-                container('jnlp') {
-                    script {
-                        timeout(time: 10, unit: 'MINUTES') {
-                            waitForQualityGate abortPipeline: false, credentialsId: 'sonar-token'
-                        }
-                    }
-                }
+    }
+    
+    stage('Install NPM Dependencies') {
+        steps {
+            container('node') {
+                sh '''
+                echo "Installing NPM dependencies..."
+                npm install --verbose
+                '''
             }
         }
-        
-        stage('Install NPM Dependencies') {
-            steps {
-                container('node') {
-                    sh '''
-                        echo "Installing NPM dependencies..."
-                        npm install --verbose
-                    '''
-                }
-            }
-        }
-        
-        
-        stage('Trivy File Scan') {
-            steps {
-                container('jnlp') {
-                    withEnv(["TRIVY_SERVER_URL=http://10.206.223.48:32384"]) {
-                        sh """
-                            trivy client \$TRIVY_SERVER_URL fs . > trivy.txt || true
-                        """
-                    }
-                }
-            }
-        }
-        
-        stage('Wait for Docker') {
-            steps {
-                container('docker') {
-                    sh '''
-                        echo "Waiting for Docker socket..."
-                        until [ -S /var/run/docker.sock ]; do 
-                            sleep 2
-                        done
-                        echo "Docker is ready!"
-                        docker info
-                    '''
-                }
-            }
-        }
-        
-        stage('Build Docker Image') {
-            steps {
-                container('docker') {
+    }
+    
+    stage('Trivy File Scan') {
+        steps {
+            container('jnlp') {
+                withEnv(["TRIVY_SERVER_URL=http://10.206.223.48:32384"]) {
                     sh """
-                        echo "Building Docker image..."
-                        docker build -t ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG} .
-                        echo "Docker image built successfully!"
+                    trivy client \$TRIVY_SERVER_URL fs . > trivy.txt || true
                     """
                 }
             }
         }
-        
-        stage('Trivy Image Scan') {
-            steps {
-                container('jnlp') {
-                    withEnv(["TRIVY_SERVER_URL=http://10.206.223.48:32384"]) {
-                        sh """
-                            trivy client \$TRIVY_SERVER_URL image ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG} > trivy-image.txt || true
-                        """
-                    }
-                }
+    }
+    
+    stage('Wait for Docker') {
+        steps {
+            container('docker') {
+                sh '''
+                echo "Waiting for Docker socket..."
+                until [ -S /var/run/docker.sock ]; do
+                sleep 2
+                done
+                echo "Docker is ready!"
+                docker info
+                '''
             }
         }
-        
-        stage('Push Docker Image') {
-            steps {
-                container('docker') {
-                    withCredentials([usernamePassword(
-                        credentialsId: 'dockerhub-creds',
-                        usernameVariable: 'DOCKER_USER',
-                        passwordVariable: 'DOCKER_PASS'
-                    )]) {
-                        sh """
-                            echo "Logging into Docker Hub..."
-                            echo \$DOCKER_PASS | docker login -u \$DOCKER_USER --password-stdin
-                            
-                            echo "Tagging image..."
-                            docker tag ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG} \$DOCKER_USER/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}
-                            
-                            echo "Pushing image to Docker Hub..."
-                            docker push \$DOCKER_USER/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}
-                            
-                            echo "Image pushed successfully!"
-                        """
-                    }
-                }
+    }
+    
+    stage('Build Docker Image') {
+        steps {
+            container('docker') {
+                sh """
+                echo "Building Docker image..."
+                docker build -t ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG} .
+                echo "Docker image built successfully!"
+                """
             }
         }
-
-        stage('Deploy to Kubernetes') {
-    	    steps {
-                container('kubectl') {
-                    withKubeConfig(credentialsId: 'k8-token') {
-                       sh '''
-                       echo "Current Directory: $(pwd)"
-                       kubectl version --client
-                       echo "Applying Kubernetes deployment..."
-                       kubectl apply -f zomato-deployment.yaml
-
-                       echo "Waiting for rollout to complete..."
-                       kubectl rollout status deployment/zomato --timeout=5m
-                       echo "Deployment successful!"
-                    '''
-
-                        }
-                    }
-                }
-            }
-	}
-
-    post {
-    always {
-        script {
-            withCredentials([usernamePassword(
-                credentialsId: 'email-creds',
-                usernameVariable: 'EMAIL_USER',
-                passwordVariable: 'EMAIL_PASS'
-            )]) {
-
-                def statusColor = currentBuild.currentResult == 'SUCCESS' ? 'green' :
-                                  currentBuild.currentResult == 'FAILURE' ? 'red' : 'orange'
-
-                emailext(
-                    to: 'kapilbtech51@gmail.com',
-                    from: EMAIL_USER,
-                    subject: "${currentBuild.currentResult}: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-                    mimeType: 'text/html',
-                    attachLog: false,
-                    attachmentsPattern: '',
-                    body: """
-                    <html>
-                      <body>
-                        <h2 style="color:${statusColor};">
-                          Build ${currentBuild.currentResult}
-                        </h2>
-                        <table border="1" cellpadding="5">
-                          <tr><td>Job</td><td>${env.JOB_NAME}</td></tr>
-                          <tr><td>Build</td><td>${env.BUILD_NUMBER}</td></tr>
-                          <tr><td>Status</td><td>${currentBuild.currentResult}</td></tr>
-                          <tr><td>URL</td>
-                              <td><a href="${env.BUILD_URL}">${env.BUILD_URL}</a></td>
-                          </tr>
-                        </table>
-                      </body>
-                    </html>
+    }
+    
+    stage('Trivy Image Scan') {
+        steps {
+            container('jnlp') {
+                withEnv(["TRIVY_SERVER_URL=http://10.206.223.48:32384"]) {
+                    sh """
+                    trivy client \$TRIVY_SERVER_URL image ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG} > trivy-image.txt || true
                     """
-                )
+                }
             }
         }
-     }
-   }
+    }
+    
+    stage('Push Docker Image') {
+        steps {
+            container('docker') {
+                withCredentials([usernamePassword(
+                credentialsId: 'dockerhub-creds',
+                usernameVariable: 'DOCKER_USER',
+                passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh """
+                    echo "Logging into Docker Hub..."
+                    echo \$DOCKER_PASS | docker login -u \$DOCKER_USER --password-stdin
+                    
+                    echo "Tagging image..."
+                docker tag ${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG} \$DOCKER_USER/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}
+                
+                echo "Pushing image to Docker Hub..."
+            docker push \$DOCKER_USER/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}
+            
+            echo "Image pushed successfully!"
+            """
+        }
+    }
+}
+}
+
+stage('Deploy to Kubernetes') {
+    steps {
+        container('kubectl') {
+            withKubeConfig(credentialsId: 'k8-token') {
+                sh '''
+                echo "Current Directory: $(pwd)"
+                kubectl version --client
+                echo "Applying Kubernetes deployment..."
+                kubectl apply -f zomato-deployment.yaml
+                
+                echo "Waiting for rollout to complete..."
+                kubectl rollout status deployment/zomato --timeout=5m
+                echo "Deployment successful!"
+                '''
+            }
+        }
+    }
+}
 }
 
 
+post {
+    always {
+        script {
+            withCredentials([usernamePassword(
+            credentialsId: 'email-creds',
+            usernameVariable: 'EMAIL_USER',
+            passwordVariable: 'EMAIL_PASS'
+            )]) {
+                
+                def statusColor = currentBuild.currentResult == 'SUCCESS' ? 'green' :
+                currentBuild.currentResult == 'FAILURE' ? 'red' : 'orange'
+                
+                emailext(
+                to: 'kapilbtech51@gmail.com',
+                from: EMAIL_USER,
+                subject: "${currentBuild.currentResult}: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                mimeType: 'text/html',
+                attachLog: false,
+                attachmentsPattern: '',
+                body: """
+                <html>
+                <body>
+                <h2 style="color:${statusColor};">
+            Build ${currentBuild.currentResult}
+            </h2>
+            <table border="1" cellpadding="5">
+            <tr><td>Job</td><td>${env.JOB_NAME}</td></tr>
+            <tr><td>Build</td><td>${env.BUILD_NUMBER}</td></tr>
+            <tr><td>Status</td><td>${currentBuild.currentResult}</td></tr>
+            <tr><td>URL</td>
+            <td><a href="${env.BUILD_URL}">${env.BUILD_URL}</a></td>
+            </tr>
+            </table>
+            </body>
+            </html>
+            """
+            )
+        }
+    }
+}
+}
+}
