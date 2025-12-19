@@ -219,10 +219,10 @@ spec:
                 container('kubectl') {
                     withCredentials([string(credentialsId: 'k8-token', variable: 'K8S_TOKEN')]) {
                         script {
-                            sh 'kubectl config set-cluster kubernetes --server=${K8S_API_SERVER} --insecure-skip-tls-verify=true'
-                            sh 'kubectl config set-credentials jenkins --token=${K8S_TOKEN}'
-                            sh 'kubectl config set-context jenkins --cluster=kubernetes --user=jenkins'
-                            sh 'kubectl config use-context jenkins'
+                            sh "kubectl config set-cluster kubernetes --server=${K8S_API_SERVER} --insecure-skip-tls-verify=true"
+                            sh "kubectl config set-credentials jenkins --token=${K8S_TOKEN}"
+                            sh "kubectl config set-context jenkins --cluster=kubernetes --user=jenkins"
+                            sh "kubectl config use-context jenkins"
                             sh 'kubectl version --client'
                             
                             def deployFile = sh(
